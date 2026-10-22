@@ -10,6 +10,9 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
 )
+from opentelemetry.semconv._incubating.attributes import (
+    gen_ai_attributes as GenAI,
+)
 from opentelemetry.util.genai.completion_hook import _NoOpCompletionHook
 from opentelemetry.util.genai.environment_variables import (
     OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT,
@@ -21,6 +24,8 @@ from opentelemetry.util.genai.types import (
     InputMessage,
     OutputMessage,
     TextPart,
+    ToolCallRequestPart,
+    ToolCallResponsePart,
 )
 
 _CAPTURE_EVENT_ENV = {
@@ -207,6 +212,111 @@ class TestHandlerCompletionHook(TestCase):  # pylint: disable=too-many-public-me
         kwargs = hook.on_completion.call_args.kwargs
         self.assertEqual(kwargs["inputs"], [])
         self.assertEqual(kwargs["outputs"], [])
+
+    def test_tool_hook_called_on_stop(self):
+        hook = MagicMock()
+        handler = self._make_handler(hook)
+
+        invocation = handler.tool("get_weather")
+        invocation.arguments = {"city": "Paris"}
+        invocation.tool_result = "sunny"
+        invocation.stop()
+
+        hook.on_completion.assert_called_once()
+        kwargs = hook.on_completion.call_args.kwargs
+        self.assertIs(kwargs["span"], invocation.span)
+        self.assertEqual(kwargs["system_instruction"], [])
+        self.assertIsNone(kwargs["tool_definitions"])
+        self.assertIsNone(kwargs["log_record"])
+
+    def test_tool_hook_called_on_fail(self):
+        hook = MagicMock()
+        handler = self._make_handler(hook)
+
+        invocation = handler.tool("get_weather")
+        invocation.arguments = {"city": "Paris"}
+        invocation.fail(RuntimeError("tool failed"))
+
+        hook.on_completion.assert_called_once()
+        kwargs = hook.on_completion.call_args.kwargs
+        self.assertIs(kwargs["span"], invocation.span)
+        self.assertEqual(len(kwargs["inputs"]), 1)
+        self.assertEqual(kwargs["outputs"], [])
+
+    def test_tool_hook_receives_arguments_and_result(self):
+        hook = MagicMock()
+        handler = self._make_handler(hook)
+
+        invocation = handler.tool("get_weather")
+        invocation.tool_call_id = "call_1"
+        invocation.arguments = {"city": "Paris"}
+        invocation.tool_result = {"forecast": "sunny"}
+        invocation.stop()
+
+        kwargs = hook.on_completion.call_args.kwargs
+        self.assertEqual(
+            kwargs["inputs"],
+            [
+                InputMessage(
+                    role="assistant",
+                    parts=[
+                        ToolCallRequestPart(
+                            arguments={"city": "Paris"},
+                            name="get_weather",
+                            id="call_1",
+                        )
+                    ],
+                )
+            ],
+        )
+        self.assertEqual(
+            kwargs["outputs"],
+            [
+                OutputMessage(
+                    role="tool",
+                    parts=[
+                        ToolCallResponsePart(
+                            response={"forecast": "sunny"}, id="call_1"
+                        )
+                    ],
+                )
+            ],
+        )
+
+    def test_tool_hook_called_with_empty_content_when_none_set(self):
+        hook = MagicMock()
+        handler = self._make_handler(hook)
+
+        handler.tool("get_weather").stop()
+
+        hook.on_completion.assert_called_once()
+        kwargs = hook.on_completion.call_args.kwargs
+        self.assertEqual(kwargs["inputs"], [])
+        self.assertEqual(kwargs["outputs"], [])
+
+    @patch.dict(
+        os.environ,
+        {OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "SPAN_ONLY"},
+    )
+    def test_tool_hook_can_redact_span_attributes(self):
+        def redact(*, span, **kwargs):
+            span.set_attribute(GenAI.GEN_AI_TOOL_CALL_ARGUMENTS, "[REDACTED]")
+
+        hook = MagicMock(on_completion=redact)
+        handler = self._make_handler(hook)
+
+        invocation = handler.tool("get_weather")
+        invocation.arguments = {"api_key": "secret"}
+        invocation.tool_result = "sunny"
+        invocation.stop()
+
+        (span,) = self.span_exporter.get_finished_spans()
+        self.assertEqual(
+            span.attributes[GenAI.GEN_AI_TOOL_CALL_ARGUMENTS], "[REDACTED]"
+        )
+        self.assertEqual(
+            span.attributes[GenAI.GEN_AI_TOOL_CALL_RESULT], "sunny"
+        )
 
     def test_local_agent_hook_called_on_stop_with_messages(self):
         hook = MagicMock()

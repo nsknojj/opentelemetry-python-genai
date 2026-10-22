@@ -19,6 +19,12 @@ from opentelemetry.util.genai._invocation import (
     _json_dumps_unless_str,
 )
 from opentelemetry.util.genai.completion_hook import CompletionHook
+from opentelemetry.util.genai.types import (
+    InputMessage,
+    OutputMessage,
+    ToolCallRequestPart,
+    ToolCallResponsePart,
+)
 from opentelemetry.util.genai.utils import ContentCapturingMode
 from opentelemetry.util.types import AnyValue, AttributeValue
 
@@ -208,6 +214,33 @@ class ToolInvocation(GenAIInvocation):
         }
         attributes.update(self.attributes)
         self.span.set_attributes(attributes)
+        inputs: list[InputMessage] = []
+        if self.arguments is not None:
+            inputs.append(
+                InputMessage(
+                    role="assistant",
+                    parts=[
+                        ToolCallRequestPart(
+                            arguments=self.arguments,
+                            name=self._name,
+                            id=self.tool_call_id,
+                        )
+                    ],
+                )
+            )
+        outputs: list[OutputMessage] = []
+        if self.tool_result is not None:
+            outputs.append(
+                OutputMessage(
+                    role="tool",
+                    parts=[
+                        ToolCallResponsePart(
+                            response=self.tool_result, id=self.tool_call_id
+                        )
+                    ],
+                )
+            )
+        self._call_completion_hook(inputs=inputs, outputs=outputs)
         self._record_metrics()
 
     def _record_metrics(self) -> None:

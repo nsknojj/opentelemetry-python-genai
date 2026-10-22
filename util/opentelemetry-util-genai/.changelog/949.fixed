@@ -1,0 +1,1 @@
+Call the completion hook when a `ToolInvocation` finishes, passing tool call arguments and results so hooks can redact or upload them.
